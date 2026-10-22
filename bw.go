@@ -163,7 +163,7 @@ func readTrim(p string) string {
 
 // ---------- consumo por equipo (contadores de iptables) ----------
 //
-// Se crea una cadena propia "ERXTUI" enganchada al principio de FORWARD con
+// Se crea una cadena propia ("ERXTUI") enganchada al principio de FORWARD con
 // dos reglas SIN objetivo por equipo (-s IP y -d IP). Una regla sin objetivo
 // solo cuenta y deja seguir al paquete, así que no altera el filtrado.
 // Todo vive en memoria: desaparece al reiniciar y la app la borra al salir.
@@ -171,15 +171,23 @@ func readTrim(p string) string {
 // Limitación: el tráfico acelerado por hardware (offload/hwnat) no pasa
 // por iptables y no se contabiliza.
 
-const acctChain = "ERXTUI"
-
 type hostAcct struct {
+	chain   string
 	mu      sync.Mutex
 	started bool
 	tracked map[string]bool
 }
 
-var acct = &hostAcct{tracked: map[string]bool{}}
+func newAcct(chain string) *hostAcct {
+	return &hostAcct{chain: chain, tracked: map[string]bool{}}
+}
+
+// acct sirve a la pestaña "Por equipo"; collectAcct al colector en segundo
+// plano (cadenas distintas para que no se pisen).
+var (
+	acct        = newAcct("ERXTUI")
+	collectAcct = newAcct("ERXTUID")
+)
 
 func ipt(args ...string) ([]byte, error) {
 	return exec.Command("sudo", append([]string{"-n", "iptables"}, args...)...).CombinedOutput()
@@ -194,10 +202,10 @@ func (a *hostAcct) poll(ips []string) (map[string]HostCounters, error) {
 	defer a.mu.Unlock()
 
 	if !a.started {
-		ipt("-N", acctChain) // ya existe: se ignora
-		ipt("-F", acctChain)
-		if _, err := ipt("-C", "FORWARD", "-j", acctChain); err != nil {
-			if out, err := ipt("-I", "FORWARD", "1", "-j", acctChain); err != nil {
+		ipt("-N", a.chain) // ya existe: se ignora
+		ipt("-F", a.chain)
+		if _, err := ipt("-C", "FORWARD", "-j", a.chain); err != nil {
+			if out, err := ipt("-I", "FORWARD", "1", "-j", a.chain); err != nil {
 				return nil, fmt.Errorf("no se pudo crear la cadena (¿sudo/iptables?): %s", strings.TrimSpace(string(out)))
 			}
 		}
@@ -209,13 +217,13 @@ func (a *hostAcct) poll(ips []string) (map[string]HostCounters, error) {
 			continue
 		}
 		for _, dir := range []string{"-s", "-d"} {
-			if out, err := ipt("-A", acctChain, dir, ip); err != nil {
+			if out, err := ipt("-A", a.chain, dir, ip); err != nil {
 				return nil, fmt.Errorf("%s", strings.TrimSpace(string(out)))
 			}
 		}
 		a.tracked[ip] = true
 	}
-	out, err := ipt("-nvxL", acctChain)
+	out, err := ipt("-nvxL", a.chain)
 	if err != nil {
 		return nil, fmt.Errorf("%s", strings.TrimSpace(string(out)))
 	}
@@ -256,9 +264,9 @@ func (a *hostAcct) cleanup() {
 	if !a.started {
 		return
 	}
-	ipt("-D", "FORWARD", "-j", acctChain)
-	ipt("-F", acctChain)
-	ipt("-X", acctChain)
+	ipt("-D", "FORWARD", "-j", a.chain)
+	ipt("-F", a.chain)
+	ipt("-X", a.chain)
 	a.started = false
 }
 

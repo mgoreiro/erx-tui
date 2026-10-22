@@ -122,3 +122,30 @@ func TestRenderBW(t *testing.T) {
 	})
 	fmt.Println(m.View())
 }
+
+func TestRenderHist(t *testing.T) {
+	leasesPath, configPath, arpPath = "testdata/dhcpd.leases", "testdata/config.boot", "testdata/arp"
+	m := newModel()
+	m.w, m.h = 100, 22
+	m.data = loadData().(dataMsg)
+	now := time.Now()
+	for i := 0; i < 30; i++ {
+		b := newBucket(hourStart(now.Add(-time.Duration(i) * time.Hour)))
+		b.addIf("eth0", uint64(i+1)*200<<20, uint64(i+1)*30<<20)
+		b.addHost("192.168.1.50", uint64(i+1)*150<<20, uint64(i+1)*10<<20)
+		b.addHost("192.168.1.9", 40<<20, 5<<20)
+		b.N["192.168.1.50"] = "iphone-miguel"
+		m.hist = append(m.hist, *b)
+	}
+	m.data.collOK, m.data.collPID = true, 321
+	m.data.alerts = []Alert{{Time: now.Add(-time.Hour).Format(time.RFC3339), Kind: "cuota", Key: "host:192.168.1.50", Msg: "Equipo iphone-miguel (192.168.1.50) ha superado 50 GB hoy (51.2 GB)"}}
+	m.data.cfg.Alerts = AlertsCfg{SustainedMinutes: 5, IfaceMbps: map[string]float64{"eth0": 400}, HostGBDay: 50}
+	for _, tab := range []int{tabHist, tabAlerts} {
+		m.tab = tab
+		fmt.Println(m.View())
+	}
+	m.tab, m.histDaily, m.histTop = tabHist, true, true
+	fmt.Println(m.View())
+	m.w = 70
+	fmt.Println(m.tabBar())
+}

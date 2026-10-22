@@ -1,0 +1,11 @@
+{
+  "interval_seconds": 60,
+  "retention_days": 90,
+  "webhook_url": "",
+  "alerts": {
+    "sustained_minutes": 5,
+    "iface_mbps": { "eth0": 400 },
+    "host_mbps": 100,
+    "host_gb_day": 50
+  }
+}

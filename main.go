@@ -12,7 +12,7 @@ import (
 )
 
 // version se sobrescribe al compilar (-ldflags "-X main.version=...").
-var version = "1.0.0"
+var version = "1.1.0"
 
 const (
 	tabHosts = iota
@@ -22,10 +22,12 @@ const (
 	tabSpeed
 	tabIfaces
 	tabHostBW
+	tabHist
+	tabAlerts
 	numTabs
 )
 
-var tabTitles = []string{"1 Equipos", "2 DHCP", "3 DNS", "4 Reinicios", "5 Velocidad", "6 Interfaces", "7 Por equipo"}
+var tabTitles = []string{"1 Equipos", "2 DHCP", "3 DNS", "4 Reinicios", "5 Velocidad", "6 Interfaces", "7 Por equipo", "8 Histórico", "9 Avisos"}
 
 var (
 	cTitle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("62")).Padding(0, 1)
@@ -49,7 +51,34 @@ type dataMsg struct {
 	hostsErr error
 	leaseErr error
 	taskErr  error
+
+	cfg     Config
+	cfgErr  error
+	alerts  []Alert
+	collPID int
+	collOK  bool
 }
+type histMsg struct {
+	bs  []Bucket
+	mod time.Time
+	err error
+}
+
+// loadHist recarga el histórico si el fichero cambió desde `last`.
+func loadHist(dir string, last time.Time, force bool) tea.Cmd {
+	return func() tea.Msg {
+		st, err := os.Stat(historyFile(dir))
+		if err != nil {
+			return histMsg{err: err}
+		}
+		if !force && st.ModTime().Equal(last) {
+			return nil
+		}
+		bs, err := loadHistory(dir)
+		return histMsg{bs, st.ModTime(), err}
+	}
+}
+
 type dnsMsg struct{ res []DNSAttempt }
 type opMsg struct {
 	text string
@@ -94,6 +123,9 @@ func loadData() tea.Msg {
 	d.leases, d.leaseErr = parseLeases(leasesPath)
 	d.hosts, d.hostsErr = listHosts(d.leases)
 	d.tasks, d.taskErr = listTasks(configPath)
+	d.cfg, d.cfgErr = loadConfig()
+	d.alerts = loadAlerts(d.cfg.DataDir, 100)
+	d.collPID, d.collOK = collectorRunning(d.cfg.DataDir)
 	return d
 }
 
@@ -127,6 +159,14 @@ type model struct {
 	hbw        *hostSampler
 	hbwErr     error
 	hbwBusy    bool
+
+	// histórico
+	hist      []Bucket
+	histMod   time.Time
+	histErr   error
+	histSubj  string
+	histDaily bool
+	histTop   bool
 
 	// reinicios
 	form      bool
@@ -168,6 +208,10 @@ func (m model) listLen() int {
 		return len(m.visibleLeases())
 	case tabSched:
 		return len(m.rebootTasks())
+	case tabHist:
+		return len(m.histRows())
+	case tabAlerts:
+		return len(m.data.alerts)
 	case tabIfaces:
 		return len(m.ifs.sorted())
 	case tabHostBW:
@@ -212,7 +256,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.w, m.h = msg.Width, msg.Height
 
 	case tickMsg:
-		return m, tea.Batch(loadData, tick())
+		return m, tea.Batch(loadData, tick(), m.histCmd(false))
+
+	case histMsg:
+		m.histErr = msg.err
+		if msg.err == nil {
+			m.hist, m.histMod = msg.bs, msg.mod
+		}
 
 	case fastTickMsg:
 		cmds := []tea.Cmd{readIfaces, fastTick()}
@@ -310,26 +360,26 @@ func (m model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// cambio de pestaña
 	switch k {
 	case "tab":
-		return m.gotoTab((m.tab + 1) % numTabs), nil
+		return m.gotoTabCmd((m.tab + 1) % numTabs)
 	case "shift+tab":
-		return m.gotoTab((m.tab + numTabs - 1) % numTabs), nil
+		return m.gotoTabCmd((m.tab + numTabs - 1) % numTabs)
 	}
 	if !m.editingText() {
 		switch k {
 		case "q":
 			return m, tea.Quit
-		case "1", "2", "3", "4", "5", "6", "7":
-			return m.gotoTab(int(k[0] - '1')), nil
+		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+			return m.gotoTabCmd(int(k[0] - '1'))
 		case "right", "l":
 			if m.tab != tabDNS {
-				return m.gotoTab((m.tab + 1) % numTabs), nil
+				return m.gotoTabCmd((m.tab + 1) % numTabs)
 			}
 		case "left", "h":
 			if m.tab != tabDNS {
-				return m.gotoTab((m.tab + numTabs - 1) % numTabs), nil
+				return m.gotoTabCmd((m.tab + numTabs - 1) % numTabs)
 			}
 		case "r":
-			return m, loadData
+			return m, tea.Batch(loadData, m.histCmd(true))
 		}
 	}
 
@@ -358,10 +408,53 @@ func (m model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.spdRunning = true
 			return m, tea.Batch(runSpeedTest, speedTick())
 		}
-	case tabIfaces, tabHostBW:
+	case tabIfaces, tabHostBW, tabAlerts:
 		m = m.moveCursor(k)
+	case tabHist:
+		m = m.moveCursor(k)
+		ss := subjects(m.hist)
+		cur := indexOf(ss, m.histSubject(ss))
+		switch k {
+		case "s":
+			if len(ss) > 0 {
+				m.histSubj, m.cursor[tabHist] = ss[(cur+1)%len(ss)], 0
+			}
+		case "S":
+			if len(ss) > 0 {
+				m.histSubj, m.cursor[tabHist] = ss[(cur+len(ss)-1)%len(ss)], 0
+			}
+		case "m":
+			m.histDaily, m.cursor[tabHist] = !m.histDaily, 0
+		case "v":
+			m.histTop, m.cursor[tabHist] = !m.histTop, 0
+		}
 	}
 	return m, nil
+}
+
+func indexOf(ss []string, s string) int {
+	for i, v := range ss {
+		if v == s {
+			return i
+		}
+	}
+	return 0
+}
+
+func (m model) histCmd(force bool) tea.Cmd {
+	if m.tab != tabHist {
+		return nil
+	}
+	dir := m.data.cfg.DataDir
+	if dir == "" {
+		dir = defaultConfig().DataDir
+	}
+	return loadHist(dir, m.histMod, force)
+}
+
+func (m model) gotoTabCmd(t int) (tea.Model, tea.Cmd) {
+	m = m.gotoTab(t)
+	return m, m.histCmd(false)
 }
 
 func (m model) gotoTab(t int) model {
@@ -441,8 +534,8 @@ func (m model) dnsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "r":
 			return m, loadData
-		case "1", "2", "3", "4", "5", "6", "7":
-			return m.gotoTab(int(msg.String()[0] - '1')), nil
+		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+			return m.gotoTabCmd(int(msg.String()[0] - '1'))
 		}
 		return m, nil
 	}
@@ -514,13 +607,7 @@ func (m model) View() string {
 	}
 	var b strings.Builder
 	b.WriteString(cTitle.Render("ER-X TUI v"+version) + " ")
-	for i, t := range tabTitles {
-		if i == m.tab {
-			b.WriteString(cTabOn.Render(t))
-		} else {
-			b.WriteString(cTabOff.Render(t))
-		}
-	}
+	b.WriteString(m.tabBar())
 	b.WriteString("\n\n")
 
 	body := ""
@@ -539,6 +626,10 @@ func (m model) View() string {
 		body = m.viewIfaces()
 	case tabHostBW:
 		body = m.viewHostBW()
+	case tabHist:
+		body = m.viewHist()
+	case tabAlerts:
+		body = m.viewAlerts()
 	}
 	b.WriteString(body)
 
@@ -553,6 +644,8 @@ func (m model) View() string {
 			st = cErr
 		}
 		b.WriteString(st.Render(clip(m.status, m.w-1)) + "\n")
+	} else if n := m.recentAlerts(); n > 0 && m.tab != tabAlerts {
+		b.WriteString(cWarn.Render(fmt.Sprintf("⚠ %d aviso(s) en las últimas 24 h — pestaña 9", n)) + "\n")
 	} else {
 		b.WriteString("\n")
 	}
@@ -561,7 +654,7 @@ func (m model) View() string {
 }
 
 func (m model) help() string {
-	base := "tab/1-7 pestañas · ↑↓ mover · r refrescar · q salir"
+	base := "tab/1-9 pestañas · ↑↓ mover · r refrescar · q salir"
 	switch {
 	case m.tab == tabLeases:
 		return "a ver todas/solo activas · " + base
@@ -569,8 +662,10 @@ func (m model) help() string {
 		return "↑↓ campo · ←→ tipo · enter probar · tab pestaña · ctrl+c salir"
 	case m.tab == tabSched && m.form:
 		return "←→ campo · ↑↓ cambiar valor (o teclea dígitos) · enter guardar · esc cancelar"
+	case m.tab == tabHist:
+		return "s/S equipo o interfaz · m horas/días · v serie/top · ↑↓ mover · q salir"
 	case m.tab == tabSpeed:
-		return "enter lanzar test · tab/1-7 pestañas · q salir"
+		return "enter lanzar test · tab/1-9 pestañas · q salir"
 	case m.tab == tabSched:
 		return "a añadir · d borrar · " + base
 	}
@@ -770,13 +865,10 @@ func clip(s string, w int) string {
 }
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "-v" || os.Args[1] == "--version") {
-		fmt.Println("erx-tui", version)
-		return
-	}
-	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
-		fmt.Println("erx-tui — equipos, cesiones DHCP, prueba DNS y reinicios programados para EdgeRouter X")
-		return
+	if len(os.Args) > 1 {
+		if handled := runCLI(os.Args[1]); handled {
+			return
+		}
 	}
 	_, err := tea.NewProgram(newModel(), tea.WithAltScreen()).Run()
 	acct.cleanup() // retira las reglas de contabilidad si se crearon
