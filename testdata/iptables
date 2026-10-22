@@ -1,0 +1,6 @@
+Chain ERXTUI (1 references)
+    pkts      bytes target     prot opt in     out     source               destination
+      10      12345            all  --  *      *       192.168.1.50         0.0.0.0/0
+      20     987654            all  --  *      *       0.0.0.0/0            192.168.1.50
+       0          0            all  --  *      *       192.168.1.9          0.0.0.0/0
+       5       2000            all  --  *      *       0.0.0.0/0            192.168.1.9

@@ -1,0 +1,30 @@
+# The format of this file is documented in the dhcpd.leases(5) manual page.
+lease 192.168.1.50 {
+  starts 3 2026/10/21 10:00:00;
+  ends 3 2026/10/21 22:00:00;
+  binding state active;
+  next binding state free;
+  hardware ethernet AA:BB:CC:00:11:22;
+  client-hostname "iphone-miguel";
+}
+lease 192.168.1.9 {
+  starts 3 2026/10/21 10:00:00;
+  ends never;
+  binding state active;
+  hardware ethernet 00:11:22:33:44:55;
+  uid "\001\000\021\"3DU";
+}
+lease 192.168.1.50 {
+  starts 4 2026/10/22 08:00:00;
+  ends 4 2099/10/22 20:00:00;
+  binding state active;
+  hardware ethernet aa:bb:cc:00:11:22;
+  client-hostname "iphone-miguel";
+}
+lease 192.168.1.77 {
+  starts 1 2026/10/19 08:00:00;
+  ends 1 2026/10/19 20:00:00;
+  binding state free;
+  hardware ethernet de:ad:be:ef:00:01;
+  client-hostname "portatil";
+}
