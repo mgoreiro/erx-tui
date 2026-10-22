@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -29,15 +30,25 @@ func TestSustainedAlert(t *testing.T) {
 	if len(all) != 1 || all[0].Kind != "sostenido" || all[0].Key != "if:eth0" {
 		t.Fatalf("avisos: %+v", all)
 	}
-	// baja y vuelve a subir -> rearma
+	// baja y vuelve a subir dentro de los 30 min -> el antirrebote lo suprime
 	c.step(now.Add(6*time.Minute), map[string]IfStat{"eth0": {RX: 5 * mb100}}, nil, nil)
 	got := 0
 	for i := 7; i < 12; i++ {
 		cur := map[string]IfStat{"eth0": {RX: 5*mb100 + uint64(i-6)*mb100}}
 		got += len(c.step(now.Add(time.Duration(i)*time.Minute), cur, nil, nil))
 	}
+	if got != 0 {
+		t.Errorf("antirrebote: %d avisos", got)
+	}
+	// pasada la franja de 30 min vuelve a avisar
+	base := uint64(10 * mb100)
+	c.step(now.Add(40*time.Minute), map[string]IfStat{"eth0": {RX: base}}, nil, nil) // baja (rearma)
+	for i := 41; i < 46; i++ {
+		cur := map[string]IfStat{"eth0": {RX: base + uint64(i-40)*mb100}}
+		got += len(c.step(now.Add(time.Duration(i)*time.Minute), cur, nil, nil))
+	}
 	if got != 1 {
-		t.Errorf("rearme: %d avisos", got)
+		t.Errorf("tras la franja debe avisar de nuevo: %d", got)
 	}
 }
 
@@ -107,7 +118,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	if err != nil || len(bs) != 3 {
 		t.Fatalf("%v %d", err, len(bs))
 	}
-	if err := compactHistory(dir, 90*24*time.Hour, now); err != nil {
+	if err := compactHistory(dir, 90*24*time.Hour, 0, 0, now); err != nil {
 		t.Fatal(err)
 	}
 	bs, _ = loadHistory(dir)
@@ -147,5 +158,91 @@ func TestConfig(t *testing.T) {
 	os.WriteFile(confPath, []byte(`{no json`), 0o644)
 	if _, err := loadConfig(); err == nil {
 		t.Error("JSON inválido debe dar error")
+	}
+}
+
+func TestCompactRespectsMaxSize(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.Local)
+	for i := 0; i < 200; i++ {
+		b := newBucket(hourStart(now.Add(-time.Duration(i) * time.Hour)))
+		b.addIf("eth0", 1000, 1000)
+		b.addHost("192.168.1.5", 1000, 1000)
+		appendLine(historyFile(dir), b)
+	}
+	before := fileSize(historyFile(dir))
+	if err := compactHistory(dir, 90*24*time.Hour, before/2, 0, now); err != nil {
+		t.Fatal(err)
+	}
+	after := fileSize(historyFile(dir))
+	if after > before/2 || after == 0 {
+		t.Fatalf("tamaño %d, tope %d", after, before/2)
+	}
+	bs, _ := loadHistory(dir)
+	if bs[len(bs)-1].T != hourStart(now) { // se conserva lo más reciente
+		t.Error("debe conservar las horas recientes y descartar las antiguas")
+	}
+	// sin espacio suficiente no toca nada
+	if err := compactHistory(dir, 90*24*time.Hour, 0, 1<<62, now); err == nil {
+		t.Error("debe negarse a compactar sin espacio")
+	}
+	if fileSize(historyFile(dir)) != after {
+		t.Error("el fichero no debe cambiar")
+	}
+}
+
+func TestTrimLinesAndFree(t *testing.T) {
+	p := t.TempDir() + "/a.jsonl"
+	for i := 0; i < 500; i++ {
+		appendLine(p, Alert{Msg: "x"})
+	}
+	if err := trimLines(p, 1000, 10); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(p)
+	if n := len(loadAlertsFrom(string(b))); n != 10 {
+		t.Errorf("quedan %d líneas", n)
+	}
+	if f, err := freeBytes(t.TempDir() + "/no/existe"); err != nil || f == 0 {
+		t.Errorf("freeBytes: %d %v", f, err)
+	}
+}
+
+func loadAlertsFrom(s string) []string {
+	var out []string
+	for _, l := range strings.Split(strings.TrimSpace(s), "\n") {
+		if l != "" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+func TestNoZerosAndAlertGap(t *testing.T) {
+	now := time.Date(2026, 10, 22, 10, 0, 0, 0, time.Local)
+	cfg := testCfg()
+	cfg.Alerts.HostGBDay = 0
+	c := newCollector(cfg, nil, now)
+	c.step(now, map[string]IfStat{"eth0": {}, "eth1": {}}, map[string]HostCounters{"10.0.0.2": {}}, nil)
+	c.step(now.Add(time.Minute), map[string]IfStat{"eth0": {RX: 5}, "eth1": {}}, map[string]HostCounters{"10.0.0.2": {}}, nil)
+	b := c.drain()[0]
+	if _, ok := b.If["eth1"]; ok || len(b.H) != 0 || len(b.N) != 0 {
+		t.Errorf("no deben guardarse ceros: %+v", b)
+	}
+	// oscilación alrededor del umbral: un aviso por franja de 30 min
+	var n int
+	rx := uint64(0)
+	prev := map[string]IfStat{"eth0": {}}
+	c = newCollector(cfg, nil, now)
+	c.step(now, prev, nil, nil)
+	for i := 1; i <= 40; i++ {
+		if i%5 != 0 { // 4 minutos alto, 1 bajo -> rearma cada 5 min
+			rx += mb100
+		}
+		cur := map[string]IfStat{"eth0": {RX: rx}}
+		n += len(c.step(now.Add(time.Duration(i)*time.Minute), cur, nil, nil))
+	}
+	if n != 2 { // 40 min: avisos en ~t=3 y ~t=33
+		t.Errorf("avisos: %d", n)
 	}
 }

@@ -30,6 +30,9 @@ func (a Alert) when() time.Time {
 	return t
 }
 
+// minAlertGap: tiempo mínimo entre dos avisos sostenidos de la misma clave.
+const minAlertGap = 30 * time.Minute
+
 // ---------- lógica del colector (sin E/S, para poder probarla) ----------
 
 type collector struct {
@@ -43,6 +46,7 @@ type collector struct {
 
 	ring   map[string][]float64 // últimas tasas (Mb/s) por clave
 	firing map[string]bool      // aviso sostenido en curso
+	lastAt map[string]time.Time // último aviso por clave (antirrebote)
 
 	dayStart time.Time
 	dayBytes map[string]uint64 // total de hoy por equipo
@@ -55,6 +59,7 @@ func newCollector(cfg Config, history []Bucket, now time.Time) *collector {
 		pending: map[int64]*Bucket{},
 		ring:    map[string][]float64{},
 		firing:  map[string]bool{},
+		lastAt:  map[string]time.Time{},
 	}
 	c.resetDay(now, history)
 	return c
@@ -112,7 +117,9 @@ func (c *collector) step(now time.Time, ifs map[string]IfStat, hs map[string]Hos
 			continue
 		}
 		rx, tx := delta(cur.RX, p.RX), delta(cur.TX, p.TX)
-		b.addIf(name, rx, tx)
+		if rx+tx > 0 { // no se guardan ceros: ahorra espacio
+			b.addIf(name, rx, tx)
+		}
 		if thr := c.cfg.Alerts.IfaceMbps[name]; thr > 0 {
 			rate := max(mbps(rx), mbps(tx))
 			if a := c.sustained(now, "if:"+name, rate, thr, "Interfaz "+name); a != nil {
@@ -127,9 +134,11 @@ func (c *collector) step(now time.Time, ifs map[string]IfStat, hs map[string]Hos
 	for ip, cur := range hs {
 		p := prevHs[ip] // equipo nuevo: la regla acaba de crearse, base 0
 		down, up := delta(cur.Down, p.Down), delta(cur.Up, p.Up)
-		b.addHost(ip, down, up)
-		if n := names[ip]; n != "" {
-			b.N[ip] = n
+		if down+up > 0 {
+			b.addHost(ip, down, up)
+			if n := names[ip]; n != "" {
+				b.N[ip] = n
+			}
 		}
 		label := ip
 		if n := names[ip]; n != "" {
@@ -175,6 +184,10 @@ func (c *collector) sustained(now time.Time, key string, rate, thr float64, labe
 		}
 	}
 	c.firing[key] = true
+	if t, ok := c.lastAt[key]; ok && now.Sub(t) < minAlertGap {
+		return nil // evita inundar el fichero si el tráfico oscila alrededor del umbral
+	}
+	c.lastAt[key] = now
 	return &Alert{
 		Time: now.Format(time.RFC3339), Kind: "sostenido", Key: key,
 		Msg: fmt.Sprintf("%s supera %.0f Mb/s durante %d min (ahora %.0f Mb/s)", label, thr, c.cfg.Alerts.SustainedMinutes, rate),
@@ -214,12 +227,28 @@ func runCollector() error {
 	if cerr != nil {
 		logf("configuración inválida, usando valores por defecto: %v", cerr)
 	}
-	compactHistory(cfg.DataDir, time.Duration(cfg.RetentionDays)*24*time.Hour, time.Now())
+	compact := func() {
+		if err := compactHistory(cfg.DataDir, time.Duration(cfg.RetentionDays)*24*time.Hour,
+			int64(cfg.HistoryMaxMB)<<20, uint64(cfg.MinFreeMB)<<20, time.Now()); err != nil {
+			logf("compactación: %v", err)
+		}
+	}
+	compact()
 	hist, _ := loadHistory(cfg.DataDir)
 	c := newCollector(cfg, hist, time.Now())
 
+	lowSpace := false
 	flush := func() {
-		for _, b := range c.drain() {
+		pending := c.drain()
+		if !hasRoom(cfg.DataDir, 64<<10, uint64(cfg.MinFreeMB)<<20) {
+			if !lowSpace {
+				logf("poco espacio libre (< %d MB): no se guarda el histórico", cfg.MinFreeMB)
+				lowSpace = true
+			}
+			return // se descartan estos datos; se reanuda al liberar espacio
+		}
+		lowSpace = false
+		for _, b := range pending {
 			if err := appendLine(historyFile(cfg.DataDir), b); err != nil {
 				logf("no se pudo guardar el histórico: %v", err)
 			}
@@ -273,7 +302,7 @@ func runCollector() error {
 			flush()
 		case <-compactT.C:
 			flush()
-			compactHistory(cfg.DataDir, time.Duration(cfg.RetentionDays)*24*time.Hour, time.Now())
+			compact()
 		case s := <-sig:
 			logf("señal %v: guardando y saliendo", s)
 			flush()
@@ -285,7 +314,10 @@ func runCollector() error {
 // deliver guarda el aviso, lo manda a syslog y, si hay URL, a un webhook.
 func deliver(cfg Config, a Alert) {
 	logf("AVISO %s: %s", a.Kind, a.Msg)
-	appendLine(alertsFile(cfg.DataDir), a)
+	if hasRoom(cfg.DataDir, 4<<10, uint64(cfg.MinFreeMB)<<20) {
+		trimLines(alertsFile(cfg.DataDir), 256<<10, 200)
+		appendLine(alertsFile(cfg.DataDir), a)
+	}
 	exec.Command("logger", "-t", "erx-tui", "-p", "daemon.warning", a.Msg).Run()
 	if cfg.WebhookURL != "" {
 		body, _ := json.Marshal(map[string]string{"text": "erx-tui: " + a.Msg, "kind": a.Kind, "key": a.Key, "time": a.Time})

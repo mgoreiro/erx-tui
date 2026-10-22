@@ -24,6 +24,8 @@ type Config struct {
 	DataDir       string    `json:"data_dir"`
 	IntervalSec   int       `json:"interval_seconds"`
 	RetentionDays int       `json:"retention_days"`
+	HistoryMaxMB  int       `json:"history_max_mb"` // tope del fichero de histórico
+	MinFreeMB     int       `json:"min_free_mb"`    // no escribir si queda menos libre
 	WebhookURL    string    `json:"webhook_url"`
 	Alerts        AlertsCfg `json:"alerts"`
 }
@@ -42,6 +44,8 @@ func defaultConfig() Config {
 		DataDir:       envOr("ERX_TUI_DATA", "/config/user-data/erx-tui-data"),
 		IntervalSec:   60,
 		RetentionDays: 90,
+		HistoryMaxMB:  8,
+		MinFreeMB:     20,
 		Alerts:        AlertsCfg{SustainedMinutes: 5},
 	}
 }
@@ -65,6 +69,12 @@ func loadConfig() (Config, error) {
 	}
 	if c.RetentionDays < 1 {
 		c.RetentionDays = 90
+	}
+	if c.HistoryMaxMB < 1 {
+		c.HistoryMaxMB = 8
+	}
+	if c.MinFreeMB < 1 {
+		c.MinFreeMB = 20
 	}
 	if c.Alerts.SustainedMinutes < 1 {
 		c.Alerts.SustainedMinutes = 5

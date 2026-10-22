@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -100,7 +102,11 @@ func loadHistory(dir string) ([]Bucket, error) {
 }
 
 // compactHistory reescribe el fichero consolidado y sin datos caducados.
-func compactHistory(dir string, keep time.Duration, now time.Time) error {
+//
+// Además de la antigüedad, respeta un tope de tamaño (maxBytes): si se
+// supera se descartan las horas más antiguas. No compacta si no hay sitio
+// para el fichero temporal.
+func compactHistory(dir string, keep time.Duration, maxBytes int64, minFree uint64, now time.Time) error {
 	bs, err := loadHistory(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -109,18 +115,33 @@ func compactHistory(dir string, keep time.Duration, now time.Time) error {
 		return err
 	}
 	cutoff := now.Add(-keep).Unix()
-	tmp := historyFile(dir) + ".tmp"
-	os.Remove(tmp)
+	var lines [][]byte
+	var total int64
 	for _, b := range bs {
 		if b.T < cutoff {
 			continue
 		}
-		if err := appendLine(tmp, b); err != nil {
+		line, err := json.Marshal(b)
+		if err != nil {
 			return err
 		}
+		lines = append(lines, line)
+		total += int64(len(line)) + 1
 	}
-	if _, err := os.Stat(tmp); err != nil { // todo caducado
+	for maxBytes > 0 && total > maxBytes && len(lines) > 0 { // descarta lo más antiguo
+		total -= int64(len(lines[0])) + 1
+		lines = lines[1:]
+	}
+	if len(lines) == 0 { // todo caducado
 		return os.Remove(historyFile(dir))
+	}
+	if !hasRoom(dir, uint64(total), minFree) {
+		return fmt.Errorf("sin espacio para compactar el histórico")
+	}
+	tmp := historyFile(dir) + ".tmp"
+	if err := os.WriteFile(tmp, append(bytes.Join(lines, []byte("\n")), '\n'), 0o644); err != nil {
+		os.Remove(tmp)
+		return err
 	}
 	return os.Rename(tmp, historyFile(dir))
 }

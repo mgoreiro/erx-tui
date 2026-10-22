@@ -57,6 +57,10 @@ type dataMsg struct {
 	alerts  []Alert
 	collPID int
 	collOK  bool
+
+	histBytes int64  // tamaño de history.jsonl
+	freeBytes uint64 // libre en el sistema de ficheros de los datos
+	freeOK    bool
 }
 type histMsg struct {
 	bs  []Bucket
@@ -126,6 +130,10 @@ func loadData() tea.Msg {
 	d.cfg, d.cfgErr = loadConfig()
 	d.alerts = loadAlerts(d.cfg.DataDir, 100)
 	d.collPID, d.collOK = collectorRunning(d.cfg.DataDir)
+	d.histBytes = fileSize(historyFile(d.cfg.DataDir))
+	if f, err := freeBytes(d.cfg.DataDir); err == nil {
+		d.freeBytes, d.freeOK = f, true
+	}
 	return d
 }
 

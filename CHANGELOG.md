@@ -5,6 +5,7 @@
 - Colector en segundo plano (`--collect`, `--install-service`, `--remove-service`, `--status`) que guarda el tráfico por hora de interfaces y equipos.
 - Pestaña 8 Histórico: serie por horas/días, por interfaz o equipo, y ranking de equipos.
 - Pestaña 9 Avisos: umbrales sostenidos por interfaz y equipo y cuota diaria por equipo; salida a syslog, fichero y webhook opcional.
+- Protección del almacenamiento: tope de tamaño del histórico, no escribe con poco espacio libre, no guarda ceros, recorte del fichero de avisos y antirrebote de avisos; la pestaña 8 muestra el uso.
 - Barra de pestañas compacta en terminales estrechas.
 
 ## 1.0.0 — 2026-10-22

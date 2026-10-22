@@ -135,7 +135,7 @@ func (m model) viewHist() string {
 		view, title = "top equipos", "Equipos por consumo"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s · %s · %s   %s\n\n", cHead.Render(title), mode, view, m.collectorBadge())
+	fmt.Fprintf(&b, "%s · %s · %s   %s\n%s\n\n", cHead.Render(title), mode, view, m.collectorBadge(), m.storageLine())
 
 	var max uint64
 	for _, r := range rows {
@@ -171,6 +171,20 @@ func maxU(a, b uint64) uint64 {
 	return a
 }
 
+// storageLine: espacio que usa el histórico y libre en la flash.
+func (m model) storageLine() string {
+	d := m.data
+	s := "Histórico: " + size(uint64(d.histBytes)) + " (tope " + fmt.Sprint(d.cfg.HistoryMaxMB) + " MB)"
+	if !d.freeOK {
+		return cDim.Render(s)
+	}
+	s += " · libre en el router: " + size(d.freeBytes)
+	if d.freeBytes < uint64(d.cfg.MinFreeMB)<<20 {
+		return cErr.Render(s + " — por debajo de " + fmt.Sprint(d.cfg.MinFreeMB) + " MB: no se guarda más")
+	}
+	return cDim.Render(s)
+}
+
 func (m model) collectorBadge() string {
 	if m.data.collOK {
 		return cOK.Render(fmt.Sprintf("● colector activo (pid %d)", m.data.collPID))
@@ -181,7 +195,7 @@ func (m model) collectorBadge() string {
 func (m model) viewAlerts() string {
 	var b strings.Builder
 	cfg := m.data.cfg
-	fmt.Fprintf(&b, "%s\n", m.collectorBadge())
+	fmt.Fprintf(&b, "%s\n%s\n", m.collectorBadge(), m.storageLine())
 	if m.data.cfgErr != nil {
 		b.WriteString(cErr.Render("Configuración inválida ("+confPath+"): "+clip(m.data.cfgErr.Error(), m.w-30)) + "\n")
 	}

@@ -37,6 +37,8 @@ El arranque usa `/config/scripts/post-config.d/` (se ejecuta como root en EdgeOS
 | `alerts.host_gb_day` | aviso (una vez al día) cuando un equipo supera esos GB entre bajada y subida |
 | `webhook_url` | opcional: se hace un `POST` JSON (`{"text": …}`) a esa URL con cada aviso |
 
+**Uso de la flash.** El colector está pensado para no llenar el router: no guarda ceros, escribe cada 30 min y compacta una vez al día. Límites (configurables en el mismo JSON): `history_max_mb` (8 por defecto; si se supera se descartan las horas más antiguas), `retention_days` (90) y `min_free_mb` (20; si queda menos libre deja de escribir y lo registra, y reanuda al liberar espacio). El fichero de avisos se recorta solo a las últimas 200 líneas y un mismo aviso sostenido no se repite antes de 30 min. La pestaña 8 muestra lo que ocupa el histórico y lo que queda libre. Con 15 interfaces y 20 equipos el histórico completo ronda 3-4 MB.
+
 Cada aviso se guarda en `alerts.jsonl`, se envía a syslog (`logger -t erx-tui`) y aparece como banner en la interfaz. Tras editar el fichero, reinicia el colector (`--remove-service` e `--install-service`).
 
 Los reinicios se guardan con `set system task-scheduler …` + `commit` + `save`, así que persisten tras reinicios y actualizaciones de firmware, y también se ven desde la CLI/GUI de EdgeOS.

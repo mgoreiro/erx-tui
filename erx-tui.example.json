@@ -1,6 +1,8 @@
 {
   "interval_seconds": 60,
   "retention_days": 90,
+  "history_max_mb": 8,
+  "min_free_mb": 20,
   "webhook_url": "",
   "alerts": {
     "sustained_minutes": 5,
