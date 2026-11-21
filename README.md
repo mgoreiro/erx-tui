@@ -45,10 +45,20 @@ Los reinicios se guardan con `set system task-scheduler …` + `commit` + `save`
 
 ## Instalar
 
+Descarga `erx-tui-mipsle` (y su `.sha256`, para comprobarlo con `shasum -a 256 -c erx-tui-mipsle.sha256`) de la
+[última release](https://github.com/mgoreiro/erx-tui/releases/latest) y cópialo al router:
+
+```sh
+scp -O erx-tui-mipsle ubnt@192.168.1.1:/tmp/erx-tui
+ssh ubnt@192.168.1.1 'mkdir -p /config/user-data && mv /tmp/erx-tui /config/user-data/erx-tui && chmod +x /config/user-data/erx-tui'
+ssh -t ubnt@192.168.1.1 /config/user-data/erx-tui
+```
+
+O compílalo tú (necesita Go 1.21 o superior):
+
 ```sh
 ./build.sh                      # genera dist/erx-tui-mipsle
 ./install.sh 192.168.1.1 ubnt   # copia a /config/user-data/erx-tui
-ssh -t ubnt@192.168.1.1 /config/user-data/erx-tui
 ```
 
 Usa un usuario del grupo `vyattacfg` (el administrador normal lo es) y **no lo lances con `sudo`**: la pestaña de reinicios aplica cambios con `sg vyattacfg`.
